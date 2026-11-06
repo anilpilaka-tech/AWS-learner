@@ -73,3 +73,44 @@ resource "aws_route_table_association" "public_2" {
   subnet_id      = aws_subnet.public_2.id
   route_table_id = aws_route_table.public.id
 }
+
+resource "aws_subnet" "private_1" {
+  vpc_id                  = aws_vpc.lab.id
+  cidr_block              = "10.0.11.0/24"
+  availability_zone       = "us-east-1a"
+  map_public_ip_on_launch = false
+
+  tags = {
+    Name = "lab-private-1"
+  }
+}
+
+resource "aws_subnet" "private_2" {
+  vpc_id                  = aws_vpc.lab.id
+  cidr_block              = "10.0.12.0/24"
+  availability_zone       = "us-east-1b"
+  map_public_ip_on_launch = false
+
+  tags = {
+    Name = "lab-private-2"
+  }
+}
+
+resource "aws_eip" "nat" {
+  domain = "vpc"
+
+  tags = {
+    Name = "lab-nat-eip"
+  }
+}
+
+resource "aws_nat_gateway" "lab" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public_1.id
+
+  tags = {
+    Name = "lab-nat"
+  }
+
+  depends_on = [aws_internet_gateway.lab]
+}
