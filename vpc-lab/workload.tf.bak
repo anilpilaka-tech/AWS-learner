@@ -1,0 +1,232 @@
+resource "aws_eip" "nat" {
+  domain = "vpc"
+
+  tags = {
+    Name = "lab-nat-eip"
+  }
+}
+
+resource "aws_nat_gateway" "lab" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public_1.id
+
+  tags = {
+    Name = "lab-nat"
+  }
+
+  depends_on = [aws_internet_gateway.lab]
+}
+
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.lab.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.lab.id
+  }
+
+  tags = {
+    Name = "lab-private-rt"
+  }
+}
+
+resource "aws_route_table_association" "private_1" {
+  subnet_id      = aws_subnet.private_1.id
+  route_table_id = aws_route_table.private.id
+}
+
+resource "aws_route_table_association" "private_2" {
+  subnet_id      = aws_subnet.private_2.id
+  route_table_id = aws_route_table.private.id
+}
+
+data "aws_ami" "al2023" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-2023.*-x86_64"]
+  }
+}
+
+resource "aws_security_group" "private_web" {
+  name        = "lab-private-web-sg"
+  description = "HTTP from inside VPC only, all outbound"
+  vpc_id      = aws_vpc.lab.id
+
+  ingress {
+    description = "HTTP from VPC"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["10.0.0.0/16"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "lab-private-web-sg"
+  }
+}
+
+resource "aws_iam_role" "ssm" {
+  name = "lab-ssm-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name = "lab-ssm-role"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "ssm" {
+  role       = aws_iam_role.ssm.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "ssm" {
+  name = "lab-ssm-profile"
+  role = aws_iam_role.ssm.name
+}
+
+resource "aws_instance" "web_1" {
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = "t3.micro"
+  subnet_id                   = aws_subnet.private_1.id
+  vpc_security_group_ids      = [aws_security_group.private_web.id]
+  iam_instance_profile        = aws_iam_instance_profile.ssm.name
+  associate_public_ip_address = false
+
+  user_data = <<-EOF
+    #!/bin/bash
+    yum update -y
+    yum install -y httpd
+    systemctl start httpd
+    systemctl enable httpd
+    echo "Hello from lab-web-1 in us-east-1a" > /var/www/html/index.html
+  EOF
+
+  tags = {
+    Name = "lab-web-1"
+  }
+}
+
+resource "aws_instance" "web_2" {
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = "t3.micro"
+  subnet_id                   = aws_subnet.private_2.id
+  vpc_security_group_ids      = [aws_security_group.private_web.id]
+  iam_instance_profile        = aws_iam_instance_profile.ssm.name
+  associate_public_ip_address = false
+
+  user_data = <<-EOF
+    #!/bin/bash
+    yum update -y
+    yum install -y httpd
+    systemctl start httpd
+    systemctl enable httpd
+    echo "Hello from lab-web-2 in us-east-1b" > /var/www/html/index.html
+  EOF
+
+  tags = {
+    Name = "lab-web-2"
+  }
+}
+
+resource "aws_security_group" "alb" {
+  name        = "lab-alb-sg"
+  description = "ALB HTTP from internet"
+  vpc_id      = aws_vpc.lab.id
+
+  ingress {
+    description = "HTTP from internet"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "lab-alb-sg"
+  }
+}
+
+resource "aws_lb" "lab" {
+  name               = "lab-alb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = [aws_subnet.public_1.id, aws_subnet.public_2.id]
+
+  tags = {
+    Name = "lab-alb"
+  }
+}
+
+resource "aws_lb_target_group" "web" {
+  name     = "lab-web-tg"
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.lab.id
+
+  health_check {
+    path                = "/"
+    port                = "80"
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    timeout             = 5
+    interval            = 10
+    matcher             = "200"
+  }
+
+  tags = {
+    Name = "lab-web-tg"
+  }
+}
+
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.lab.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.web.arn
+  }
+}
+
+resource "aws_lb_target_group_attachment" "web_1" {
+  target_group_arn = aws_lb_target_group.web.arn
+  target_id        = aws_instance.web_1.id
+  port             = 80
+}
+
+resource "aws_lb_target_group_attachment" "web_2" {
+  target_group_arn = aws_lb_target_group.web.arn
+  target_id        = aws_instance.web_2.id
+  port             = 80
+}
