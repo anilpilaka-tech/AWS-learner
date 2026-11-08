@@ -1,0 +1,187 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Lab — same $0 VPC base as the Nov 6 Terraform lab, in CloudFormation.
+  VPC + 4 subnets (2 public, 2 private, 2 AZs) + internet gateway + public
+  route table. No NAT gateway, no EC2, no ALB — $0 while it stands.
+  Compare side by side with ~/AWS-learner/vpc-lab/main.tf, then delete
+  the stack the same day.
+
+# ---------------------------------------------------------------------------
+# Why the names are cfn-lab-* instead of lab-*
+# The Terraform base already owns the Name tags lab-vpc, lab-public-1,
+# lab-private-1, etc. Reusing those tags would make the two VPCs
+# indistinguishable in the console AND break the SSM lab, whose Terraform
+# data sources look resources up by Name tag. Same shape, different names:
+# the Terraform base is untouched, and deleting this stack cannot touch it.
+# A second VPC with the same 10.0.0.0/16 CIDR is allowed — VPCs are
+# separate networks unless you peer them, which this lab never does.
+# ---------------------------------------------------------------------------
+
+Parameters:
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR for the VPC — same as Terraform lab-vpc.
+  PublicSubnet1Cidr:
+    Type: String
+    Default: 10.0.1.0/24
+    Description: Public subnet in AZ 1 — same as Terraform lab-public-1.
+  PublicSubnet2Cidr:
+    Type: String
+    Default: 10.0.2.0/24
+    Description: Public subnet in AZ 2 — same as Terraform lab-public-2.
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: 10.0.11.0/24
+    Description: Private subnet in AZ 1 — same as Terraform lab-private-1.
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: 10.0.12.0/24
+    Description: Private subnet in AZ 2 — same as Terraform lab-private-2.
+  AvailabilityZone1:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-1a
+    Description: First AZ (us-east-1, old account — same as Terraform lab).
+  AvailabilityZone2:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-1b
+    Description: Second AZ (us-east-1, old account — same as Terraform lab).
+
+Resources:
+  # Terraform: resource "aws_vpc" "lab_vpc"
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: cfn-lab-vpc
+
+  # Terraform: resource "aws_internet_gateway" "lab_igw"
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: cfn-lab-igw
+
+  # Terraform has no separate resource for this — the IGW attachment is
+  # implied by the aws_internet_gateway resource. CloudFormation needs
+  # it spelled out. This is the one structural difference in the file.
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # Terraform: resource "aws_subnet" "lab_public_1" — map_public_ip_on_launch = true
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnet1Cidr
+      AvailabilityZone: !Ref AvailabilityZone1
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: cfn-lab-public-1
+
+  # Terraform: resource "aws_subnet" "lab_public_2"
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnet2Cidr
+      AvailabilityZone: !Ref AvailabilityZone2
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: cfn-lab-public-2
+
+  # Terraform: resource "aws_subnet" "lab_private_1" — map_public_ip_on_launch = false
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnet1Cidr
+      AvailabilityZone: !Ref AvailabilityZone1
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: cfn-lab-private-1
+
+  # Terraform: resource "aws_subnet" "lab_private_2"
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnet2Cidr
+      AvailabilityZone: !Ref AvailabilityZone2
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: cfn-lab-private-2
+
+  # Terraform: resource "aws_route_table" "lab_public_rt"
+  # (the Terraform file puts the 0.0.0.0/0 route inline; CloudFormation
+  # splits it into a separate AWS::EC2::Route resource below.)
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: cfn-lab-public-rt
+
+  # Terraform: the inline route { 0.0.0.0/0 -> IGW } inside lab_public_rt.
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  # Terraform: resource "aws_route_table_association" (public-1)
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  # Terraform: resource "aws_route_table_association" (public-2)
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # NOTE — deliberately absent, same as the Terraform $0 base:
+  # no private route table (the private subnets have no 0.0.0.0/0 route
+  # until a NAT gateway is added, as in the Nov 6 3-tier workload),
+  # no NAT gateway, no EC2, no ALB. That is what keeps this stack $0.
+
+Outputs:
+  VpcId:
+    Description: ID of the CloudFormation VPC (compare with Terraform lab-vpc vpc-04dd3cde2ed3cdf3f, recreated Nov 7 after the Day 2 destroy/recreate test)
+    Value: !Ref Vpc
+  PublicSubnet1Id:
+    Description: cfn-lab-public-1 (10.0.1.0/24, us-east-1a)
+    Value: !Ref PublicSubnet1
+  PublicSubnet2Id:
+    Description: cfn-lab-public-2 (10.0.2.0/24, us-east-1b)
+    Value: !Ref PublicSubnet2
+  PrivateSubnet1Id:
+    Description: cfn-lab-private-1 (10.0.11.0/24, us-east-1a)
+    Value: !Ref PrivateSubnet1
+  PrivateSubnet2Id:
+    Description: cfn-lab-private-2 (10.0.12.0/24, us-east-1b)
+    Value: !Ref PrivateSubnet2
+  InternetGatewayId:
+    Description: cfn-lab-igw
+    Value: !Ref InternetGateway
+  PublicRouteTableId:
+    Description: cfn-lab-public-rt (0.0.0.0/0 -> IGW)
+    Value: !Ref PublicRouteTable
